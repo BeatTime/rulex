@@ -1,5 +1,7 @@
 package common
 
+import "github.com/expr-lang/expr/vm"
+
 const (
 	READ_COIL                        = 1  //  Read Coil
 	READ_DISCRETE_INPUT              = 2  //  Read Discrete Input
@@ -39,18 +41,22 @@ type Registers struct {
 *
  */
 type RegisterRW struct {
-	UUID      string  `json:"UUID"`
-	Tag       string  `json:"tag" validate:"required" title:"数据Tag"`         // 数据Tag
-	Alias     string  `json:"alias" validate:"required" title:"别名"`          // 别名
-	Function  int     `json:"function" validate:"required" title:"Modbus功能"` // Function
-	SlaverId  byte    `json:"slaverId" validate:"required" title:"从机ID"`     // 从机ID
-	Address   uint16  `json:"address" validate:"required" title:"地址"`        // Address
-	Frequency int64   `json:"frequency" validate:"required" title:"采集频率"`    // 间隔
-	Quantity  uint16  `json:"quantity" validate:"required" title:"数量"`       // Quantity
-	Type      string  `json:"type"`                                          // 运行时数据
-	Order     string  `json:"order"`                                         // 运行时数据
-	Weight    float64 `json:"weight"`
-	Value     string  `json:"value,omitempty"` // 运行时数据. Type, Order不同值也不同
+	UUID              string      `json:"UUID"`
+	Tag               string      `json:"tag" validate:"required" title:"数据Tag"`         // 数据Tag
+	Alias             string      `json:"alias" validate:"required" title:"别名"`          // 别名
+	Function          int         `json:"function" validate:"required" title:"Modbus功能"` // Function
+	SlaverId          byte        `json:"slaverId" validate:"required" title:"从机ID"`     // 从机ID
+	Address           uint16      `json:"address" validate:"required" title:"地址"`        // Address
+	Frequency         int64       `json:"frequency" validate:"required" title:"采集频率"`    // 间隔
+	Quantity          uint16      `json:"quantity" validate:"required" title:"数量"`       // Quantity
+	Type              string      `json:"type"`                                          // 运行时数据
+	Order             string      `json:"order"`                                         // 运行时数据
+	Weight            float64     `json:"weight"`
+	Value             string      `json:"value,omitempty"` // 运行时数据. Type, Order不同值也不同
+	EnableReadExpr    bool        `json:"-"`
+	ReadExprProgram   *vm.Program `json:"-"`
+	EnableWriteExpr   bool        `json:"-"`
+	WriteExprInstance *vm.Program `json:"-"`
 }
 
 type RegisterList []*RegisterRW

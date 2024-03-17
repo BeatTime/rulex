@@ -1,6 +1,8 @@
 module github.com/hootrhino/rulex
 
-go 1.18
+go 1.21
+
+toolchain go1.21.3
 
 require (
 	github.com/BeatTime/bacnet v0.2.1
@@ -67,6 +69,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dsnet/golib/memfile v1.0.0 // indirect
+	github.com/expr-lang/expr v1.16.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect

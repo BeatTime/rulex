@@ -21,10 +21,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
 	golog "log"
 	"sort"
-	"strconv"
-
 	"time"
 
 	"github.com/hootrhino/rulex/common"
@@ -73,6 +73,10 @@ type _GMODConfig struct {
 	HostConfig   common.HostConfig `json:"hostConfig"`
 }
 
+type ExprEnv struct {
+	N any
+}
+
 type GroupedTags struct {
 	Function  int    `json:"function"`
 	SlaverId  byte   `json:"slaverId"`
@@ -98,18 +102,22 @@ func (g *GroupedTags) String() string {
 *
  */
 type ModbusPoint struct {
-	UUID      string  `json:"uuid,omitempty"` // 当UUID为空时新建
-	Tag       string  `json:"tag"`
-	Alias     string  `json:"alias"`
-	Function  int     `json:"function"`
-	SlaverId  byte    `json:"slaverId"`
-	Address   uint16  `json:"address"`
-	Frequency int64   `json:"frequency"`
-	Quantity  uint16  `json:"quantity"`
-	Value     string  `json:"value,omitempty"` // 运行时数据
-	Type      string  `json:"type"`            // 运行时数据
-	Order     string  `json:"order"`           // 运行时数据
-	Weight    float64 `json:"weight"`          // 权重
+	UUID            string  `json:"uuid,omitempty"` // 当UUID为空时新建
+	Tag             string  `json:"tag"`
+	Alias           string  `json:"alias"`
+	Function        int     `json:"function"`
+	SlaverId        byte    `json:"slaverId"`
+	Address         uint16  `json:"address"`
+	Frequency       int64   `json:"frequency"`
+	Quantity        uint16  `json:"quantity"`
+	Value           string  `json:"value,omitempty"` // 运行时数据
+	Type            string  `json:"type"`            // 运行时数据
+	Order           string  `json:"order"`           // 运行时数据
+	Weight          float64 `json:"weight"`          // 权重
+	EnableReadExpr  bool
+	ReadExpr        string
+	EnableWriteExpr bool
+	WriteExpr       string
 }
 type generic_modbus_device struct {
 	typex.XStatus
@@ -163,33 +171,55 @@ func (mdev *generic_modbus_device) Init(devId string, configMap map[string]inter
 		return errors.New("unsupported mode, only can be one of 'TCP' or 'UART'")
 	}
 	// 合并数据库里面的点位表
-	var ModbusPointList []ModbusPoint
+	var pointList []ModbusPoint
 	errDb := interdb.DB().Table("m_modbus_data_points").
-		Where("device_uuid=?", devId).Find(&ModbusPointList).Error
+		Where("device_uuid=?", devId).Find(&pointList).Error
 	if errDb != nil {
 		return errDb
 	}
-	for _, ModbusPoint := range ModbusPointList {
+	for _, point := range pointList {
 		// 频率不能太快
-		if ModbusPoint.Frequency < 50 {
+		if point.Frequency < 50 {
 			return errors.New("'frequency' must grate than 50 millisecond")
 		}
-		mdev.Registers[ModbusPoint.UUID] = &common.RegisterRW{
-			UUID:      ModbusPoint.UUID,
-			Tag:       ModbusPoint.Tag,
-			Alias:     ModbusPoint.Alias,
-			Function:  ModbusPoint.Function,
-			SlaverId:  ModbusPoint.SlaverId,
-			Address:   ModbusPoint.Address,
-			Quantity:  ModbusPoint.Quantity,
-			Frequency: ModbusPoint.Frequency,
-			Type:      ModbusPoint.Type,
-			Order:     ModbusPoint.Order,
-			Weight:    ModbusPoint.Weight,
+		var readInstance *vm.Program
+		var writeInstance *vm.Program
+		if point.EnableReadExpr {
+			instance, errDb := expr.Compile(point.ReadExpr)
+			if errDb != nil {
+				glogger.GLogger.Error("expression compile error, uuid=%v", point.UUID)
+			} else {
+				readInstance = instance
+			}
+		}
+		if point.EnableWriteExpr {
+			instance, errDb := expr.Compile(point.WriteExpr)
+			if errDb != nil {
+				glogger.GLogger.Error("expression compile error, uuid=%v", point.UUID)
+			} else {
+				writeInstance = instance
+			}
+		}
+		mdev.Registers[point.UUID] = &common.RegisterRW{
+			UUID:              point.UUID,
+			Tag:               point.Tag,
+			Alias:             point.Alias,
+			Function:          point.Function,
+			SlaverId:          point.SlaverId,
+			Address:           point.Address,
+			Quantity:          point.Quantity,
+			Frequency:         point.Frequency,
+			Type:              point.Type,
+			Order:             point.Order,
+			Weight:            point.Weight,
+			EnableReadExpr:    point.EnableReadExpr,
+			ReadExprProgram:   readInstance,
+			EnableWriteExpr:   point.EnableWriteExpr,
+			WriteExprInstance: writeInstance,
 		}
 		LastFetchTime := uint64(time.Now().UnixMilli())
-		modbuscache.SetValue(mdev.PointId, ModbusPoint.UUID, modbuscache.RegisterPoint{
-			UUID:          ModbusPoint.UUID,
+		modbuscache.SetValue(mdev.PointId, point.UUID, modbuscache.RegisterPoint{
+			UUID:          point.UUID,
 			Status:        0,
 			LastFetchTime: LastFetchTime,
 			Value:         "",
@@ -566,20 +596,27 @@ func (mdev *generic_modbus_device) modbusSingleRead(buffer []byte) (int, error) 
 			}
 			// ValidData := [4]byte{0, 0, 0, 0}
 			copy(__modbusReadResult[:], results[:])
-			Value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+			value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+
+			val, errExpr := runReadExpr(value, r)
+			if errExpr != nil {
+				glogger.GLogger.Errorf("run expression error err=%v", err)
+				continue
+			}
+
 			lastTimes := uint64(time.Now().UnixMilli())
 			Reg := RegJsonValue{
 				Tag:           r.Tag,
 				SlaverId:      r.SlaverId,
 				Alias:         r.Alias,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			}
 			RegisterRWs = append(RegisterRWs, Reg)
 			modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 				UUID:          uuid,
 				Status:        0,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			})
 		}
@@ -594,20 +631,26 @@ func (mdev *generic_modbus_device) modbusSingleRead(buffer []byte) (int, error) 
 			}
 			// ValidData := [4]byte{0, 0, 0, 0}
 			copy(__modbusReadResult[:], results[:])
-			Value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+			value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+
+			val, errExpr := runReadExpr(value, r)
+			if errExpr != nil {
+				glogger.GLogger.Errorf("run expression error err=%v", err)
+				continue
+			}
 			lastTimes := uint64(time.Now().UnixMilli())
 			Reg := RegJsonValue{
 				Tag:           r.Tag,
 				SlaverId:      r.SlaverId,
 				Alias:         r.Alias,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			}
 			RegisterRWs = append(RegisterRWs, Reg)
 			modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 				UUID:          uuid,
 				Status:        0,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			})
 		}
@@ -623,21 +666,26 @@ func (mdev *generic_modbus_device) modbusSingleRead(buffer []byte) (int, error) 
 			}
 			// ValidData := [4]byte{0, 0, 0, 0}
 			copy(__modbusReadResult[:], results[:])
-			Value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+			value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
 			lastTimes := uint64(time.Now().UnixMilli())
 
+			val, errExpr := runReadExpr(value, r)
+			if errExpr != nil {
+				glogger.GLogger.Errorf("run expression error err=%v", err)
+				continue
+			}
 			Reg := RegJsonValue{
 				Tag:           r.Tag,
 				SlaverId:      r.SlaverId,
 				Alias:         r.Alias,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			}
 			RegisterRWs = append(RegisterRWs, Reg)
 			modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 				UUID:          uuid,
 				Status:        0,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			})
 
@@ -653,20 +701,26 @@ func (mdev *generic_modbus_device) modbusSingleRead(buffer []byte) (int, error) 
 			}
 			// ValidData := [4]byte{0, 0, 0, 0}
 			copy(__modbusReadResult[:], results[:])
-			Value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+			value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
+
+			val, errExpr := runReadExpr(value, r)
+			if errExpr != nil {
+				glogger.GLogger.Errorf("run expression error err=%v", err)
+				continue
+			}
 			lastTimes := uint64(time.Now().UnixMilli())
 			Reg := RegJsonValue{
 				Tag:           r.Tag,
 				SlaverId:      r.SlaverId,
 				Alias:         r.Alias,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			}
 			RegisterRWs = append(RegisterRWs, Reg)
 			modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 				UUID:          uuid,
 				Status:        0,
-				Value:         Value,
+				Value:         fmt.Sprintf("%v", val),
 				LastFetchTime: lastTimes,
 			})
 		}
@@ -701,12 +755,18 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				offsetBit := offsetAddr % uint16(8)
 				value := (buf[offsetByte] >> offsetBit) & 0x1
 
+				val, errExpr := runReadExpr(value, r)
+				if errExpr != nil {
+					glogger.GLogger.Errorf("run expression error err=%v", err)
+					continue
+				}
+
 				ts := time.Now().UnixMilli()
 				jsonVal := RegJsonValue{
 					Tag:           r.Tag,
 					SlaverId:      r.SlaverId,
 					Alias:         r.Alias,
-					Value:         strconv.Itoa(int(value)),
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				}
 				jsonValueGroups = append(jsonValueGroups, jsonVal)
@@ -714,7 +774,7 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 					UUID:          uuid,
 					Status:        0,
-					Value:         strconv.Itoa(int(value)),
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				})
 			}
@@ -731,12 +791,18 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				offsetBit := offsetAddr % uint16(8)
 				value := (buf[offsetByte] >> offsetBit) & 0x1
 
+				val, errExpr := runReadExpr(value, r)
+				if errExpr != nil {
+					glogger.GLogger.Errorf("run expression error err=%v", err)
+					continue
+				}
+
 				ts := time.Now().UnixMilli()
 				jsonVal := RegJsonValue{
 					Tag:           r.Tag,
 					SlaverId:      r.SlaverId,
 					Alias:         r.Alias,
-					Value:         strconv.Itoa(int(value)),
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				}
 				jsonValueGroups = append(jsonValueGroups, jsonVal)
@@ -744,7 +810,7 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 					UUID:          uuid,
 					Status:        0,
-					Value:         strconv.Itoa(int(value)),
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				})
 			}
@@ -761,12 +827,18 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				copy(__modbusReadResult[:], buf[offsetByte:offsetByteEnd])
 				value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
 
+				val, errExpr := runReadExpr(value, r)
+				if errExpr != nil {
+					glogger.GLogger.Errorf("run expression error err=%v", err)
+					continue
+				}
+
 				ts := time.Now().UnixMilli()
 				jsonVal := RegJsonValue{
 					Tag:           r.Tag,
 					SlaverId:      r.SlaverId,
 					Alias:         r.Alias,
-					Value:         value,
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				}
 				jsonValueGroups = append(jsonValueGroups, jsonVal)
@@ -774,7 +846,7 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 					UUID:          uuid,
 					Status:        0,
-					Value:         value,
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				})
 			}
@@ -791,12 +863,18 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				copy(__modbusReadResult[:], buf[offsetByte:offsetByteEnd])
 				value := utils.ParseModbusValue(r.Type, r.Order, float32(r.Weight), __modbusReadResult)
 
+				val, errExpr := runReadExpr(value, r)
+				if errExpr != nil {
+					glogger.GLogger.Errorf("run expression error err=%v", err)
+					continue
+				}
+
 				ts := time.Now().UnixMilli()
 				jsonVal := RegJsonValue{
 					Tag:           r.Tag,
 					SlaverId:      r.SlaverId,
 					Alias:         r.Alias,
-					Value:         value,
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				}
 				jsonValueGroups = append(jsonValueGroups, jsonVal)
@@ -804,7 +882,7 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 				modbuscache.SetValue(mdev.PointId, uuid, modbuscache.RegisterPoint{
 					UUID:          uuid,
 					Status:        0,
-					Value:         value,
+					Value:         fmt.Sprintf("%v", val),
 					LastFetchTime: uint64(ts),
 				})
 			}
@@ -819,9 +897,26 @@ func (mdev *generic_modbus_device) modbusGroupRead(buffer []byte) (int, error) {
 	}
 	return 0, nil
 }
+
 func (mdev *generic_modbus_device) RTURead(buffer []byte) (int, error) {
 	return mdev.modbusRead(buffer)
 }
 func (mdev *generic_modbus_device) TCPRead(buffer []byte) (int, error) {
 	return mdev.modbusRead(buffer)
+}
+
+func runReadExpr(value any, r *common.RegisterRW) (any, error) {
+	ret := value
+
+	if r.EnableReadExpr {
+		env := ExprEnv{
+			N: value,
+		}
+		result, err := expr.Run(r.ReadExprProgram, env)
+		if err != nil {
+			return nil, err
+		}
+		ret = result
+	}
+	return ret, nil
 }
