@@ -39,6 +39,11 @@ func NewLicenseManager(r typex.RuleX) *LicenseManager {
 }
 
 func (l *LicenseManager) Init(section *ini.Section) error {
+	enable, _ := section.GetKey("enable")
+	if enable != nil && !enable.MustBool(true) {
+		glogger.GLogger.Infof("skip license verify....")
+		return nil
+	}
 	license_path, err1 := section.GetKey("license_path")
 	errMsg := "Load License Public Cipher Failed, May be Your License IS Invalid."
 	if err1 != nil {
